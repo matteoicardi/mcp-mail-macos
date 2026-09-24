@@ -352,8 +352,79 @@ def list_messages(
     return result
 
 
+def _read_index_flags(identifier: int) -> tuple[bool, bool]:
+    """Best-effort read/flagged lookup from mail-fts's own SQLite index.
+
+    Defaults to (False, False) when the index is missing or the message isn't
+    indexed yet. Never raises, never touches Mail.app -- this is purely a
+    local, read-only SELECT.
+    """
+    try:
+        index_path = config.get("index_path")
+        if not os.path.isfile(index_path):
+            return False, False
+        import sqlite3
+
+        connection = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        try:
+            row = connection.execute(
+                "SELECT read, flagged FROM locations WHERE message = ? LIMIT 1",
+                (identifier,),
+            ).fetchone()
+        finally:
+            connection.close()
+    except Exception:  # noqa: BLE001 - flags are best-effort, never fatal
+        return False, False
+    if row is None:
+        return False, False
+    return bool(row[0]), bool(row[1])
+
+
+def _get_message_fast(reference: MessageReference, max_body_chars: int) -> dict[str, Any] | None:
+    """Read-only .emlx fast path for get_message. Returns None (never raises)
+    when no local file exists, so the caller falls back to AppleScript.
+    """
+    try:
+        import mail_index
+
+        parsed = mail_index.get_message_from_file(reference.identifier, max_body_chars)
+    except Exception:  # noqa: BLE001 - any failure here just means "use AppleScript"
+        return None
+    if parsed is None:
+        return None
+
+    read_status, flagged_status = _read_index_flags(reference.identifier)
+    return {
+        "ok": True,
+        "message_id": reference.encode(),
+        "mail_id": parsed["mail_id"],
+        "subject": parsed["subject"],
+        "sender": parsed["sender"],
+        "reply_to": parsed["reply_to"],
+        "to": parsed["to"],
+        "cc": parsed["cc"],
+        "bcc": parsed["bcc"],
+        "date_received": parsed["date_received"],
+        "read": read_status,
+        "flagged": flagged_status,
+        "rfc_message_id": parsed["rfc_message_id"],
+        "mailbox": reference.mailbox,
+        "account": reference.account,
+        "attachments": parsed["attachments"],
+        "body_truncated": parsed["body_truncated"],
+        "headers": parsed["headers"],
+        "body": parsed["body"],
+        "source": "emlx",
+    }
+
+
 def get_message(message_id: str, max_body_chars: int = 20000, timeout: int = DEFAULT_TIMEOUT) -> dict[str, Any]:
     reference = MessageReference.decode(message_id)
+
+    fast = _get_message_fast(reference, max_body_chars)
+    if fast is not None:
+        return fast
+
     raw = run_script(
         "get_message",
         [reference.account, reference.mailbox, str(reference.identifier), str(max(200, int(max_body_chars)))],
@@ -397,6 +468,7 @@ def get_message(message_id: str, max_body_chars: int = 20000, timeout: int = DEF
         "body_truncated": _as_bool(_field(row, 14)),
         "headers": _field(row, 15),
         "body": _field(row, 16),
+        "source": "applescript",
     }
 
 

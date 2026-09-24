@@ -286,6 +286,108 @@ def strip_markup(text: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
+def get_message_from_file(identifier: int, max_body_chars: int = 20000) -> dict[str, Any] | None:
+    """Reads one message's headers, body and attachment metadata straight out
+    of its .emlx file -- no Mail.app, no AppleScript, no Apple Event involved.
+
+    Returns None when no local file exists for this id (not downloaded, or
+    never stored locally); the caller is expected to fall back to the
+    existing AppleScript get_message in that case. Never raises: any parse
+    failure is treated the same as "no local file" so the fallback still runs.
+    """
+    path = find_message_file(identifier)
+    if path is None:
+        return None
+    raw = read_raw_message(path)
+    if raw is None:
+        return None
+    try:
+        message = email.message_from_bytes(raw, policy=email.policy.default)
+    except Exception:  # noqa: BLE001 - a malformed file just isn't a fast-path hit
+        return None
+
+    # Inline images the HTML body displays via <img src="cid:...">. Those are
+    # part of the body, not real attachments -- same rule extract_attachments
+    # already applies.
+    body_images: set[str] = set()
+    for part in message.walk():
+        if part.get_content_type() != "text/html":
+            continue
+        try:
+            html_text = (part.get_payload(decode=True) or b"").decode(
+                part.get_content_charset() or "utf-8", errors="replace"
+            )
+        except LookupError:
+            continue
+        for cid in re.findall(r"<img[^>]+src=[\"']?cid:([^\"'>\s]+)", html_text, re.IGNORECASE):
+            body_images.add(cid.strip())
+
+    plain: list[str] = []
+    markup: list[str] = []
+    attachments: list[dict[str, Any]] = []
+    for part in message.walk():
+        content_type = part.get_content_type()
+        filename = part.get_filename()
+        if content_type in {"text/plain", "text/html"} and not filename:
+            try:
+                payload = part.get_payload(decode=True) or b""
+            except Exception:  # noqa: BLE001
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                text = payload.decode(charset, errors="replace")
+            except LookupError:
+                text = payload.decode("utf-8", errors="replace")
+            (plain if content_type == "text/plain" else markup).append(text)
+            continue
+        if part.get_content_maintype() == "multipart":
+            continue
+        disposition = part.get_content_disposition()
+        if not filename and disposition != "attachment":
+            continue
+        content_id = (part.get("content-id") or "").strip().strip("<>")
+        if disposition != "attachment" and content_id and content_id in body_images:
+            continue  # inline body image, not a real attachment
+        try:
+            payload = part.get_payload(decode=True) or b""
+        except Exception:  # noqa: BLE001
+            payload = b""
+        attachments.append({"name": filename or "attachment", "size": len(payload), "downloaded": len(payload) > 0})
+
+    body = "\n".join(plain) if plain else strip_markup("\n".join(markup))
+    body_truncated = len(body) > max_body_chars
+    if body_truncated:
+        body = body[:max_body_chars]
+
+    headers_text = "\n".join(f"{key}: {value}" for key, value in message.items())[:8000]
+
+    date_received = ""
+    date_value = message.get("Date")
+    if date_value:
+        try:
+            from email.utils import parsedate_to_datetime
+
+            date_received = parsedate_to_datetime(date_value).isoformat()
+        except Exception:  # noqa: BLE001 - an unparsable Date header just leaves this blank
+            date_received = ""
+
+    return {
+        "mail_id": identifier,
+        "subject": str(message.get("Subject", "") or ""),
+        "sender": str(message.get("From", "") or ""),
+        "reply_to": str(message.get("Reply-To", "") or ""),
+        "to": str(message.get("To", "") or ""),
+        "cc": str(message.get("Cc", "") or ""),
+        "bcc": str(message.get("Bcc", "") or ""),
+        "date_received": date_received,
+        "rfc_message_id": (message.get("Message-Id") or "").strip().strip("<>"),
+        "attachments": attachments,
+        "body_truncated": body_truncated,
+        "headers": headers_text,
+        "body": body,
+    }
+
+
 # --------------------------------------------------------------------------
 # Reading Mail's index
 # --------------------------------------------------------------------------
