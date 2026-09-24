@@ -70,8 +70,11 @@ on run argv
 			send theReply
 		else
 			save theReply
+			-- Mail needs a moment to flush the save; closing immediately after
+			-- can discard it even though "saving yes" was asked for.
+			delay 0.5
 			try
-				close theReply saving no
+				close theReply saving yes
 			end try
 		end if
 	end tell
