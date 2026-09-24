@@ -31,6 +31,7 @@ from datetime import datetime
 from typing import Any, Sequence
 
 import config
+import mail_applescript_compose
 import mail_imap
 import mail_message
 import mail_signature
@@ -186,6 +187,11 @@ def create_draft(
     prepared = build(
         to, subject, body, cc, bcc, attachments, sender, signature, as_draft=True
     )
+    imap_account = mail_imap.find_account(prepared["account"]["name"])
+    if not mail_applescript_compose.has_imap(imap_account):
+        return mail_applescript_compose.compose(
+            "draft", to, subject, body, cc, bcc, attachments, sender
+        )
     filed = mail_imap.append_draft(
         prepared["account"]["name"], prepared["message"].as_bytes()
     )
@@ -312,6 +318,18 @@ def reply(
         if candidate["name"] == original.get("account"):
             account = candidate
             break
+
+    imap_account = mail_imap.find_account(account["name"])
+    if not mail_applescript_compose.has_imap(imap_account):
+        result = mail_applescript_compose.reply_headers_only(message_id, reply_all)
+        if not as_draft:
+            result["note"] += (
+                " A send was requested, but this account cannot be sent through "
+                "automatically either -- open the draft, add the body, and send it "
+                "from Mail yourself."
+            )
+        return result
+
     mine = set(account["addresses"])
     from_address = next(
         (
@@ -391,6 +409,11 @@ def send(
 ) -> dict[str, Any]:
     """Sends the message through the account's own outgoing server."""
     prepared = build(to, subject, body, cc, bcc, attachments, sender, signature)
+    imap_account = mail_imap.find_account(prepared["account"]["name"])
+    if not mail_applescript_compose.has_smtp(imap_account):
+        return mail_applescript_compose.compose(
+            "send", to, subject, body, cc, bcc, attachments, sender
+        )
     envelope = prepared["to"] + prepared["cc"] + prepared["bcc"]
 
     message = prepared["message"]

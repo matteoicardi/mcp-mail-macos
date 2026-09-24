@@ -194,7 +194,38 @@ def strip_markup(text: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
-def get_message_from_file(identifier: int, max_body_chars: int = 20000) -> dict[str, Any] | None:
+_file_cache: dict[int, str] = {}
+_file_cache_built_at: float = 0.0
+_FILE_CACHE_TTL_SECONDS = 300
+
+
+def _message_file_path(identifier: int, force_refresh: bool = False) -> str | None:
+    """The id's .emlx path, from a cache of one walk of the store.
+
+    scan_message_files costs a few seconds, so every single lookup walking
+    the store on its own would make the fast path slower than the
+    AppleScript one it exists to avoid. The cache is good for
+    _FILE_CACHE_TTL_SECONDS, and is also rebuilt once, immediately, whenever
+    the id asked for is not in it -- covering a message written since the
+    last build without waiting out the TTL. force_refresh skips straight to
+    that rebuild, for a caller that just wrote the file and cannot wait even
+    a stale cache's one lookup.
+    """
+    global _file_cache, _file_cache_built_at
+    now = time.time()
+    stale = (now - _file_cache_built_at) > _FILE_CACHE_TTL_SECONDS
+    if force_refresh or not _file_cache or stale or identifier not in _file_cache:
+        try:
+            _file_cache = scan_message_files(find_store())
+            _file_cache_built_at = now
+        except Exception:  # noqa: BLE001 - no local store is the same as no file
+            return None
+    return _file_cache.get(identifier)
+
+
+def get_message_from_file(
+    identifier: int, max_body_chars: int = 20000, force_refresh: bool = False
+) -> dict[str, Any] | None:
     """Reads one message's headers, body and attachment metadata straight out
     of its .emlx file -- no Mail.app, no AppleScript, no Apple Event involved.
 
@@ -203,7 +234,7 @@ def get_message_from_file(identifier: int, max_body_chars: int = 20000) -> dict[
     existing AppleScript get_message in that case. Never raises: any parse
     failure is treated the same as "no local file" so the fallback still runs.
     """
-    path = find_message_file(identifier)
+    path = _message_file_path(identifier, force_refresh=force_refresh)
     if path is None:
         return None
     raw = read_raw_message(path)

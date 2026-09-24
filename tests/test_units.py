@@ -21,6 +21,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+import mail_applescript_compose
 import mail_draft
 import mail_files
 import mail_imap
@@ -640,6 +641,67 @@ class ReplyTests(unittest.TestCase):
 
     def test_an_unreadable_date_is_left_as_it_came(self):
         self.assertEqual(mail_draft._readable_date("pas une date"), "pas une date")
+
+
+class AppleScriptComposeFallbackTests(unittest.TestCase):
+    """The Exchange/Outlook fallback: which accounts need it, and whether a
+    draft's body is trusted rather than assumed."""
+
+    class _Server:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+    class _Account:
+        def __init__(self, incoming_host: str, outgoing_host: str) -> None:
+            self.incoming = AppleScriptComposeFallbackTests._Server(incoming_host)
+            self.outgoing = AppleScriptComposeFallbackTests._Server(outgoing_host)
+
+    def test_an_account_with_a_host_has_imap(self):
+        self.assertTrue(mail_applescript_compose.has_imap(self._Account("imap.gmail.com", "")))
+
+    def test_an_exchange_account_has_no_imap(self):
+        self.assertFalse(mail_applescript_compose.has_imap(self._Account("", "")))
+
+    def test_an_account_with_a_host_has_smtp(self):
+        self.assertTrue(mail_applescript_compose.has_smtp(self._Account("", "smtp.gmail.com")))
+
+    def test_an_exchange_account_has_no_smtp(self):
+        self.assertFalse(mail_applescript_compose.has_smtp(self._Account("", "")))
+
+    def test_a_missing_draft_id_is_reported_rather_than_looked_up(self):
+        body_set, note = mail_applescript_compose._verify_body("", "hello")
+        self.assertFalse(body_set)
+        self.assertIn("could not be found", note)
+
+    def test_a_body_that_survived_the_save_is_confirmed(self):
+        original = mail_index.get_message_from_file
+        mail_index.get_message_from_file = lambda *a, **k: {"body": "hello there"}
+        try:
+            body_set, note = mail_applescript_compose._verify_body("123", "hello there, Matteo")
+        finally:
+            mail_index.get_message_from_file = original
+        self.assertTrue(body_set)
+        self.assertEqual(note, "")
+
+    def test_a_body_that_did_not_survive_the_save_is_reported(self):
+        original = mail_index.get_message_from_file
+        mail_index.get_message_from_file = lambda *a, **k: {"body": ""}
+        try:
+            body_set, note = mail_applescript_compose._verify_body("123", "hello there")
+        finally:
+            mail_index.get_message_from_file = original
+        self.assertFalse(body_set)
+        self.assertIn("known content-setting bug", note)
+
+    def test_the_draft_file_not_being_readable_back_is_reported_not_assumed(self):
+        original = mail_index.get_message_from_file
+        mail_index.get_message_from_file = lambda *a, **k: None
+        try:
+            body_set, note = mail_applescript_compose._verify_body("123", "hello there")
+        finally:
+            mail_index.get_message_from_file = original
+        self.assertFalse(body_set)
+        self.assertIn("could not be read back", note)
 
 
 class PartClassificationTests(unittest.TestCase):
